@@ -1,17 +1,14 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
 const express = require('express');
 const bodyParser = require('body-parser');
+const QRCode = require('qrcode'); // المكتبة الجديدة
 
-// إعداد السيرفر
 const app = express();
 const port = process.env.PORT || 3000;
 
-// للسماح باستقبال بيانات JSON
 app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// تهيئة عميل الواتساب
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -20,83 +17,89 @@ const client = new Client({
     }
 });
 
-// متغير للتأكد من جاهزية العميل
 let isClientReady = false;
+let qrCodeImage = null; // متغير لحفظ صورة الباركود
 
 client.on('qr', (qr) => {
-    console.log('QR RECEIVED', qr);
-    qrcode.generate(qr, { small: true });
+    console.log('QR Code received via stream');
+    // تحويل كود الباركود إلى صورة يمكن عرضها في المتصفح
+    QRCode.toDataURL(qr, (err, url) => {
+        if (err) {
+            console.error('Error generating QR', err);
+            return;
+        }
+        qrCodeImage = url;
+    });
 });
 
 client.on('ready', () => {
     console.log('✅ Client is ready!');
     isClientReady = true;
+    qrCodeImage = null; // لا نحتاج الباركود بعد الاتصال
 });
 
-client.on('auth_failure', msg => {
-    console.error('AUTHENTICATION FAILURE', msg);
+client.on('authenticated', () => {
+    console.log('AUTHENTICATED');
 });
-
-// دالة مساعدة لتنسيق الرقم (مثال: تحويل 050XXXX إلى 96650XXXX@c.us)
-function formatPhoneNumber(number) {
-    // إزالة أي رموز غير رقمية
-    let cleaned = number.toString().replace(/\D/g, '');
-
-    // التحقق اذا كان الرقم يبدأ بـ 05 (سعودي محلي) نحوله لـ 966
-    if (cleaned.startsWith('05')) {
-        cleaned = '966' + cleaned.substring(1);
-    }
-    
-    // إذا كان الرقم لا يحتوي على مفتاح دولة (أقل من 10 أرقام مثلاً)، قد يحتاج معالجة
-    // هنا نفترض أن الرقم سيصلنا كاملاً أو محلياً
-
-    // إضافة اللاحقة الخاصة بواتساب
-    if (!cleaned.endsWith('@c.us')) {
-        cleaned += '@c.us';
-    }
-    return cleaned;
-}
 
 // ==========================================
-// نقطة الاتصال (API Endpoint)
-// الرابط سيكون: /send-message
+// الصفحة الرئيسية (لعرض الحالة أو الباركود)
+// ==========================================
+app.get('/', (req, res) => {
+    if (isClientReady) {
+        return res.send(`
+            <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+                <h1 style="color: green;">✅ System is Ready</h1>
+                <p>WhatsApp is connected successfully.</p>
+            </div>
+        `);
+    }
+
+    if (qrCodeImage) {
+        return res.send(`
+            <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+                <h1>Scan this QR Code</h1>
+                <p>Please open WhatsApp > Linked Devices > Link a Device</p>
+                <img src="${qrCodeImage}" alt="QR Code" style="width: 300px; height: 300px; border: 1px solid #ccc;">
+                <p>Refresh page if code expires.</p>
+            </div>
+        `);
+    }
+
+    return res.send(`
+        <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1>⏳ Initializing...</h1>
+            <p>Please wait a moment and refresh the page.</p>
+        </div>
+    `);
+});
+
+// ==========================================
+// نقطة الإرسال (API)
 // ==========================================
 app.post('/send-message', async (req, res) => {
-    if (!isClientReady) {
-        return res.status(503).json({ status: 'error', message: 'WhatsApp client not ready yet' });
-    }
-
+    if (!isClientReady) return res.status(503).json({ status: 'error', message: 'Client not ready' });
+    
     const { phone, message } = req.body;
-
-    if (!phone || !message) {
-        return res.status(400).json({ status: 'error', message: 'Phone and message are required' });
-    }
+    if (!phone || !message) return res.status(400).json({ status: 'error', message: 'Missing data' });
 
     try {
-        const chatId = formatPhoneNumber(phone);
-        
-        // التحقق من أن الرقم مسجل في واتساب
+        let chatId = phone.replace(/\D/g, '');
+        if (chatId.startsWith('05')) chatId = '966' + chatId.substring(1);
+        if (!chatId.endsWith('@c.us')) chatId += '@c.us';
+
         const isRegistered = await client.isRegisteredUser(chatId);
-        if (!isRegistered) {
-            return res.status(404).json({ status: 'error', message: 'Number not registered on WhatsApp' });
-        }
+        if (!isRegistered) return res.status(404).json({ status: 'error', message: 'Number not found' });
 
-        // إرسال الرسالة
         await client.sendMessage(chatId, message);
-        console.log(`Message sent to ${phone}`);
-        
-        return res.json({ status: 'success', message: 'Message sent successfully' });
-
+        return res.json({ status: 'success', message: 'Message sent' });
     } catch (error) {
-        console.error('Error sending message:', error);
-        return res.status(500).json({ status: 'error', message: 'Failed to send message' });
+        return res.status(500).json({ status: 'error', message: error.toString() });
     }
 });
 
-// تشغيل الواتساب
 client.initialize();
 
-// تشغيل السيرفر
 app.listen(port, () => {
-    console.log(`Server is running on port ${port}`);
+    console.log(`Server running on port ${port}`);
 });
