@@ -13,6 +13,7 @@
   "dependencies": {
     "body-parser": "^2.2.1",
     "express": "^5.2.1",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "whatsapp-web.js": "^1.34.2"
   }
