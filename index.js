@@ -1,109 +1,71 @@
-const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js'); // أضفنا MessageMedia
+const { Client, RemoteAuth } = require('whatsapp-web.js');
+const { AwsS3Store } = require('wwebjs-aws-s3');
+const { S3Client } = require('@aws-sdk/client-s3');
 const express = require('express');
-const bodyParser = require('body-parser');
-const QRCode = require('qrcode');
+const qrcode = require('qrcode-terminal');
 
 const app = express();
-const port = process.env.PORT || 3000;
+app.use(express.json());
 
-// زيادة حجم البيانات المسموح بها لاستقبال ملفات PDF
-app.use(bodyParser.json({ limit: '50mb' }));
-app.use(bodyParser.urlencoded({ limit: '50mb', extended: true }));
-
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'], headless: true }
+// إعداد الاتصال بـ Supabase Storage كأنه S3
+const s3 = new S3Client({
+    region: 'us-east-1', // قيمة افتراضية مطلوبة
+    endpoint: process.env.SUPABASE_S3_ENDPOINT, // سنجلبه من إعدادات Supabase
+    credentials: {
+        accessKeyId: process.env.SUPABASE_ACCESS_KEY,
+        secretAccessKey: process.env.SUPABASE_SECRET_KEY
+    },
+    forcePathStyle: true // ضروري لـ Supabase
 });
 
-let isClientReady = false;
-let qrCodeImage = null;
+// تهيئة المخزن لحفظ الجلسة
+const store = new AwsS3Store({
+    bucketName: 'whatsapp-sessions',
+    remoteDataPath: 'auth/session', // مسار الملف داخل البكت
+    s3Client: s3
+});
 
+// إعداد عميل الواتساب
+const client = new Client({
+    authStrategy: new RemoteAuth({
+        store: store,
+        backupSyncIntervalMs: 60000 // حفظ الجلسة كل دقيقة احتياطياً
+    }),
+    puppeteer: {
+        args: ['--no-sandbox', '--disable-setuid-sandbox'] // ضروري لـ Render
+    }
+});
+
+// توليد رمز QR
 client.on('qr', (qr) => {
-    QRCode.toDataURL(qr, (err, url) => { qrCodeImage = url; });
+    console.log('QR RECEIVED', qr);
+    qrcode.generate(qr, { small: true });
 });
 
 client.on('ready', () => {
-    console.log('✅ Client is ready!');
-    isClientReady = true;
-    qrCodeImage = null;
+    console.log('✅ WhatsApp Client is ready!');
 });
 
-// ==========================================
-// 1. الصفحة الرئيسية (تعرض الباركود + قائمة الجروبات)
-// ==========================================
-app.get('/', async (req, res) => {
-    if (!isClientReady) {
-        if (qrCodeImage) return res.send(`<div style="text-align:center;"><h2>Scan QR</h2><img src="${qrCodeImage}"></div>`);
-        return res.send(`<h2>Initializing... Refresh shortly.</h2>`);
-    }
-
-    // عرض قائمة الجروبات لتسهيل معرفة ID الجروب
-    let groupsHtml = '<h3>Connected! Here are your Groups:</h3><ul>';
-    try {
-        const chats = await client.getChats();
-        const groups = chats.filter(chat => chat.isGroup);
-        groups.forEach(group => {
-            groupsHtml += `<li><b>${group.name}</b>: <code style="background:#eee;padding:3px;">${group.id._serialized}</code></li>`;
-        });
-    } catch (e) { groupsHtml += `<li>Error fetching groups: ${e.toString()}</li>`; }
-    groupsHtml += '</ul>';
-
-    return res.send(`<div style="font-family:sans-serif; padding:20px;">${groupsHtml}</div>`);
+client.on('remote_session_saved', () => {
+    console.log('💾 Session saved to Supabase successfully!');
 });
 
-// ==========================================
-// 2. إرسال رسالة نصية (للأفراد أو الجروبات)
-// ==========================================
-app.post('/send-message', async (req, res) => {
-    if (!isClientReady) return res.status(503).json({ status: 'error', message: 'Client not ready' });
-    const { phone, message } = req.body; // phone can be a number OR group ID
-    if (!phone || !message) return res.status(400).json({ status: 'error', message: 'Missing data' });
-
+// API لإرسال الرسائل (الذي ستستدعيه Edge Function)
+app.post('/send-text', async (req, res) => {
+    const { target, message } = req.body;
     try {
-        let chatId = phone;
-        // إذا لم يكن جروب (لا يحتوي على @g.us)، قم بتنظيف الرقم
-        if (!chatId.includes('@g.us')) {
-            chatId = chatId.replace(/\D/g, '');
-            if (chatId.startsWith('05')) chatId = '966' + chatId.substring(1);
-            if (!chatId.endsWith('@c.us')) chatId += '@c.us';
-        }
-
+        const chatId = target.includes('@') ? target : `${target}@c.us`;
         await client.sendMessage(chatId, message);
-        return res.json({ status: 'success' });
-    } catch (error) {
-        return res.status(500).json({ status: 'error', message: error.toString() });
-    }
-});
-
-// ==========================================
-// 3. إرسال وسائط (PDF / صور)
-// ==========================================
-app.post('/send-media', async (req, res) => {
-    if (!isClientReady) return res.status(503).json({ status: 'error', message: 'Client not ready' });
-    
-    // fileData: Base64 string, fileName: name.pdf, caption: text
-    const { phone, fileData, fileName, caption } = req.body; 
-    
-    if (!phone || !fileData) return res.status(400).json({ status: 'error', message: 'Missing data' });
-
-    try {
-        let chatId = phone;
-        if (!chatId.includes('@g.us')) {
-            chatId = chatId.replace(/\D/g, '');
-            if (chatId.startsWith('05')) chatId = '966' + chatId.substring(1);
-            if (!chatId.endsWith('@c.us')) chatId += '@c.us';
-        }
-
-        // إنشاء كائن الميديا
-        const media = new MessageMedia('application/pdf', fileData, fileName); // أو mimetype آخر حسب الحاجة
-        
-        await client.sendMessage(chatId, media, { caption: caption || '' });
-        return res.json({ status: 'success' });
+        res.json({ status: 'success' });
     } catch (error) {
         console.error(error);
-        return res.status(500).json({ status: 'error', message: error.toString() });
+        res.status(500).json({ status: 'error', error: error.toString() });
     }
 });
 
+// تشغيل السيرفر
+const PORT = process.env.PORT || 3000;
 client.initialize();
-app.listen(port, () => console.log(`Server running on port ${port}`));
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
