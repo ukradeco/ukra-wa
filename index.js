@@ -89,13 +89,33 @@ app.get('/qr', async (req, res) => {
 });
 
 app.post('/send-text', async (req, res) => {
-    const { target, message } = req.body;
+    let { target, message } = req.body;
+    
     try {
+        // 1. تنظيف الرقم وإصلاح الصيغة
+        // نحذف أي مسافات أو رموز
+        target = target.toString().replace(/\D/g, ''); 
+        
+        // إصلاح الرقم السعودي (تحويل 05 إلى 9665)
+        if (target.startsWith('05')) {
+            target = '966' + target.substring(1);
+        }
+        
+        // إذا كان الرقم لا يحتوي على مفتاح دولة (أقل من 10 أرقام)، ربما يكون خطأ ولكن سنحاول
+        // إضافة اللاحقة الخاصة بواتساب
         const chatId = target.includes('@') ? target : `${target}@c.us`;
+
+        // 2. التحقق من أن العميل جاهز
+        if (!client.info) {
+            return res.status(503).json({ status: 'error', message: 'Client not ready yet' });
+        }
+
+        // 3. الإرسال
         await client.sendMessage(chatId, message);
         res.json({ status: 'success' });
+
     } catch (error) {
-        console.error(error);
+        console.error("Send Error:", error);
         res.status(500).json({ status: 'error', error: error.toString() });
     }
 });
