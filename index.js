@@ -41,12 +41,21 @@ const store = new AwsS3Store({
 
 const client = new Client({
     authStrategy: new RemoteAuth({
-        clientId: 'vchocolate-session', // اسم ثابت للجلسة لضمان استعادتها
+        clientId: 'vchocolate-main-session', // <--- هذا السطر هو الأهم! اسم ثابت للجلسة
         store: store,
-        backupSyncIntervalMs: 60000 
+        backupSyncIntervalMs: 60000 // حفظ احتياطي كل دقيقة
     }),
     puppeteer: {
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
+        headless: true,
+        args: [
+            '--no-sandbox',
+            '--disable-setuid-sandbox',
+            '--disable-dev-shm-usage',
+            '--disable-accelerated-2d-canvas',
+            '--no-first-run',
+            '--no-zygote',
+            '--disable-gpu'
+        ]
     }
 });
 
