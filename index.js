@@ -9,9 +9,11 @@ const {
     HeadObjectCommand 
 } = require('@aws-sdk/client-s3');
 const express = require('express');
+const cors = require('cors'); 
 const QRCodeImage = require('qrcode');
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 let currentQR = null;
